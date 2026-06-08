@@ -1,48 +1,159 @@
+"""
+data_generate.py
+Generates simulation data (ground truth + noisy measurements) for two motion models:
+    - CV: Constant Velocity     — state = [x, vx, y, vy]
+    - CA: Constant Acceleration — state = [x, vx, ax, y, vy, ay]
+
+Both models are discrete-time LTI systems with Gaussian noise.
+Course: Signals and Systems
+"""
+
 import numpy as np
 
-#generate the perfect 2D coordinates of a flying object
-def generate_true_trajectory(v0=20.0, angle_deg=45.0, num_points=50):
-    g = 9.81  
-    angle_rad = np.radians(angle_deg)
-    
-    v0_x = v0 * np.cos(angle_rad)
-    v0_y = v0 * np.sin(angle_rad)
-    
-    t_flight = 2 * v0_y / g
-    
-    t = np.linspace(0, t_flight, num=num_points)
-    
-    x = v0_x * t
-    y = v0_y * t - 0.5 * g * t**2
-    
-    return t, x, y
 
-#add noise to the true coordinates to create fake sensor readings
-def add_measurement_noise(x, y, noise_std_dev=1.5):
-   
-    # np.random.normal(mean, standard_deviation, size)
-    noise_x = np.random.normal(0, noise_std_dev, size=x.shape)
-    noise_y = np.random.normal(0, noise_std_dev, size=y.shape)
-    
-    z_x = x + noise_x
-    z_y = y + noise_y
-    
-    return z_x, z_y
+# Constant Velocity (CV) — used for H1, H2
 
-#simulate losing track of the object .
-def simulate_occlusion(z_x, z_y, start_index, end_index):
-   
-    z_x_occluded = np.copy(z_x)
-    z_y_occluded = np.copy(z_y)
-    
-    z_x_occluded[start_index:end_index] = np.nan
-    z_y_occluded[start_index:end_index] = np.nan
-    
-    return z_x_occluded, z_y_occluded
+def generate_cv_trajectory(n_steps: int = 100,
+                            dt: float = 0.1,
+                            q_std: float = 0.05,
+                            r_std: float = 2.0,
+                            seed: int = 0):
+    """
+    Generate a Constant Velocity (CV) trajectory.
 
-if __name__ == "__main__":
-    t, true_x, true_y = generate_true_trajectory()
-    measured_x, measured_y = add_measurement_noise(true_x, true_y, noise_std_dev=2.0)
-    
-    print(f"True X at step 10: {true_x[10]:.2f}m")
-    print(f"Noisy X at step 10: {measured_x[10]:.2f}m")
+    State vector: x_k = [x, vx, y, vy]^T  (4-dim)
+
+    State transition matrix F:
+        | 1  dt  0   0 |
+        | 0   1  0   0 |
+        | 0   0  1  dt |
+        | 0   0  0   1 |
+
+    Observation matrix H (position only):
+        | 1  0  0  0 |
+        | 0  0  1  0 |
+
+    Parameters
+    ----------
+    n_steps : int   -- number of time steps
+    dt      : float -- sampling period (s)
+    q_std   : float -- process noise std,  w_k ~ N(0, q_std^2 * I)
+    r_std   : float -- measurement noise std, v_k ~ N(0, r_std^2 * I)
+    seed    : int   -- random seed for reproducible Monte Carlo runs
+
+    Returns
+    -------
+    states       : ndarray, shape (n_steps+1, 4) -- true state x_k
+    measurements : ndarray, shape (n_steps, 2)   -- noisy observation z_k = [x, y]
+    F, H, Q, R   : model matrices
+    """
+    np.random.seed(seed)
+
+    x0 = np.array([0.0, 1.5, 0.0, 0.8])
+
+    F = np.array([[1, dt,  0,  0],
+                  [0,  1,  0,  0],
+                  [0,  0,  1, dt],
+                  [0,  0,  0,  1]])
+
+    H = np.array([[1, 0, 0, 0],
+                  [0, 0, 1, 0]])
+
+    Q = q_std ** 2 * np.eye(4)   # process noise covariance
+    R = r_std ** 2 * np.eye(2)   # measurement noise covariance
+
+    states = [x0.copy()]
+    measurements = []
+    x = x0.copy()
+
+    W = np.random.multivariate_normal(np.zeros(4), Q, size=n_steps)
+    V = np.random.multivariate_normal(np.zeros(2), R, size=n_steps)
+
+    for i in range(n_steps):
+        # dynamics: x_{k+1} = F * x_k + w_k
+        x = F @ x + W[i]
+        # observation: z_k = H * x_k + v_k
+        z = H @ x + V[i]
+        states.append(x.copy())
+        measurements.append(z)
+
+
+    return np.array(states), np.array(measurements), F, H, Q, R
+
+
+# Constant Acceleration (CA) — used for H3 (model mismatch)
+
+def generate_ca_trajectory(n_steps: int = 100,
+                            dt: float = 0.1,
+                            q_std: float = 0.05,
+                            r_std: float = 2.0,
+                            ax: float = 0.3,
+                            ay: float = 0.2,
+                            seed: int = 0):
+    """
+    Generate a Constant Acceleration (CA) trajectory.
+
+    State vector: x_k = [x, vx, ax, y, vy, ay]^T  (6-dim)
+
+    State transition matrix F:
+        | 1  dt  dt^2/2  0   0       0    |
+        | 0   1      dt  0   0       0    |
+        | 0   0       1  0   0       0    |
+        | 0   0       0  1  dt  dt^2/2    |
+        | 0   0       0  0   1      dt    |
+        | 0   0       0  0   0       1    |
+
+    Observation matrix H (position only):
+        | 1  0  0  0  0  0 |
+        | 0  0  0  1  0  0 |
+
+    Parameters
+    ----------
+    n_steps : int   -- number of time steps
+    dt      : float -- sampling period (s)
+    q_std   : float -- process noise std
+    r_std   : float -- measurement noise std
+    ax      : float -- initial acceleration along x (m/s^2)
+    ay      : float -- initial acceleration along y (m/s^2)
+    seed    : int   -- random seed
+
+    Returns
+    -------
+    states       : ndarray, shape (n_steps+1, 6) -- true state x_k
+    measurements : ndarray, shape (n_steps, 2)   -- noisy observation z_k = [x, y]
+    F, H, Q, R   : model matrices
+    """
+    np.random.seed(seed)
+
+    x0 = np.array([0.0, 1.5, ax, 0.0, 0.8, ay])
+
+    F = np.array([
+        [1, dt, 0.5 * dt ** 2, 0,  0,           0],
+        [0,  1,            dt, 0,  0,           0],
+        [0,  0,             1, 0,  0,           0],
+        [0,  0,             0, 1, dt, 0.5 * dt ** 2],
+        [0,  0,             0, 0,  1,          dt],
+        [0,  0,             0, 0,  0,           1],
+    ])
+
+    H = np.array([[1, 0, 0, 0, 0, 0],
+                  [0, 0, 0, 1, 0, 0]])
+
+    Q = q_std ** 2 * np.eye(6)
+    R = r_std ** 2 * np.eye(2)
+
+    states = [x0.copy()]
+    measurements = []
+    x = x0.copy()
+
+    W = np.random.multivariate_normal(np.zeros(6), Q, size=n_steps)
+    V = np.random.multivariate_normal(np.zeros(2), R, size=n_steps)
+
+    for i in range(n_steps):
+        x = F @ x + W[i]
+        z = H @ x + V[i]
+        states.append(x.copy())
+        measurements.append(z)
+
+
+    return np.array(states), np.array(measurements), F, H, Q, R
